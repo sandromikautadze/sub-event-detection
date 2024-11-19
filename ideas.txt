@@ -1,3 +1,3 @@
-- Finetune BERT with just text and label
-- Finetune BERT with text, label and timestamp (so more data)
+- Finetune BERT with basic loss (cross-entropy?)
+- Finetune BERT with contrastive learning
 - Graph approach
