@@ -1,0 +1,3 @@
+- Finetune BERT with just text and label
+- Finetune BERT with text, label and timestamp (so more data)
+- Graph approach
