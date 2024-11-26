@@ -1,3 +1,0 @@
-- Finetune BERT with basic loss (cross-entropy?)
-- Finetune BERT with contrastive learning
-- Graph approach
