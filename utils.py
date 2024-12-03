@@ -161,13 +161,13 @@ def process_and_merge_embeddings(df, cls_column, id_column, event_column, aggreg
 
 def train_and_validate_model(model, train_loader, val_loader, criterion, optimizer, device, epochs=100, seed=42, use_tqdm=True):
     """
-    Train and validate a PyTorch model.
+    Train and (optionally) validate a PyTorch model.
 
     Args:
-        model (torch.nn.Module): The PyTorch model to train and validate.
+        model (torch.nn.Module): The PyTorch model to train.
         train_loader (torch.utils.data.DataLoader): DataLoader for the training dataset.
-        val_loader (torch.utils.data.DataLoader): DataLoader for the validation dataset.
-        criterion (torch.nn.Module): The loss function used to compute training and validation losses.
+        val_loader (torch.utils.data.DataLoader or None): DataLoader for the validation dataset. If None, validation is skipped.
+        criterion (torch.nn.Module): The loss function used to compute training (and validation) losses.
         optimizer (torch.optim.Optimizer): The optimizer used to update model parameters.
         device (torch.device): The device to perform computations on (e.g., 'cpu' or 'cuda').
         epochs (int, optional): The number of training epochs. Defaults to 100.
@@ -175,12 +175,12 @@ def train_and_validate_model(model, train_loader, val_loader, criterion, optimiz
         use_tqdm (bool, optional): Whether to display progress bars using tqdm. Defaults to True.
 
     Returns:
-        dict: A dictionary containing the training and validation losses and accuracies over all epochs. 
+        dict: A dictionary containing the training losses and accuracies over all epochs, and optionally validation losses and accuracies. 
               Keys include:
                 - 'train_loss': List of training losses for each epoch.
-                - 'val_loss': List of validation losses for each epoch.
                 - 'train_accuracy': List of training accuracies for each epoch.
-                - 'val_accuracy': List of validation accuracies for each epoch.
+                - 'val_loss': List of validation losses for each epoch (empty if validation is skipped).
+                - 'val_accuracy': List of validation accuracies for each epoch (empty if validation is skipped).
     """
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -221,47 +221,55 @@ def train_and_validate_model(model, train_loader, val_loader, criterion, optimiz
             if use_tqdm:
                 train_iterator.set_postfix(batch_loss=loss.item(), batch_accuracy=batch_accuracy)
 
-        train_losses.append(running_loss / len(train_loader))
+        train_loss_epoch = running_loss / len(train_loader)
+        train_losses.append(train_loss_epoch)
         train_accuracy = correct_preds / total_preds
         train_accuracies.append(train_accuracy)
 
-        # VALIDATION
-        model.eval()
-        val_loss = 0.0
-        correct_preds = 0
-        total_preds = 0
+        print(f"Training Loss: {train_loss_epoch:.4f}, Accuracy: {train_accuracy:.4f}")
 
-        val_iterator = tqdm(val_loader, desc="Validating", leave=True) if use_tqdm else val_loader
+        # VALIDATION (only if val_loader is provided)
+        if val_loader is not None:
+            model.eval()
+            val_loss = 0.0
+            correct_preds = 0
+            total_preds = 0
 
-        with torch.no_grad():
-            for batch in val_iterator:
-                X_batch, y_batch = batch[0].to(device), batch[1].to(device)
+            val_iterator = tqdm(val_loader, desc="Validating", leave=True) if use_tqdm else val_loader
 
-                logits = model(X_batch).squeeze()
-                loss = criterion(logits, y_batch)
-                val_loss += loss.item()
-                preds = (torch.sigmoid(logits) >= 0.5).float()
-                correct = (preds == y_batch).sum().item()
-                batch_accuracy = correct / y_batch.size(0)
+            with torch.no_grad():
+                for batch in val_iterator:
+                    X_batch, y_batch = batch[0].to(device), batch[1].to(device)
 
-                correct_preds += correct
-                total_preds += y_batch.size(0)
+                    logits = model(X_batch).squeeze()
+                    loss = criterion(logits, y_batch)
+                    val_loss += loss.item()
+                    preds = (torch.sigmoid(logits) >= 0.5).float()
+                    correct = (preds == y_batch).sum().item()
+                    batch_accuracy = correct / y_batch.size(0)
 
-                if use_tqdm:
-                    val_iterator.set_postfix(batch_loss=loss.item(), batch_accuracy=batch_accuracy)
+                    correct_preds += correct
+                    total_preds += y_batch.size(0)
 
-        val_losses.append(val_loss / len(val_loader))
-        val_accuracy = correct_preds / total_preds
-        val_accuracies.append(val_accuracy)
+                    if use_tqdm:
+                        val_iterator.set_postfix(batch_loss=loss.item(), batch_accuracy=batch_accuracy)
 
-        print(f"Training Loss: {train_losses[-1]:.4f}, Accuracy: {train_accuracy:.4f}")
-        print(f"Validation Loss: {val_losses[-1]:.4f}, Accuracy: {val_accuracy:.4f}")
+            val_loss_epoch = val_loss / len(val_loader)
+            val_losses.append(val_loss_epoch)
+            val_accuracy = correct_preds / total_preds
+            val_accuracies.append(val_accuracy)
+
+            print(f"Validation Loss: {val_loss_epoch:.4f}, Accuracy: {val_accuracy:.4f}")
+        else:
+            # If no validation, append None or skip printing
+            val_losses.append(None)
+            val_accuracies.append(None)
 
     print("Training Done")
     history = {
         'train_loss': train_losses,
-        'val_loss': val_losses,
         'train_accuracy': train_accuracies,
+        'val_loss': val_losses,
         'val_accuracy': val_accuracies
     }
 
