@@ -5,6 +5,9 @@ Authors: Lara Hofman, Sandro Mikautadze, Elio Samaha
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from sklearn.metrics.pairwise import cosine_similarity
+import re
+from collections import Counter
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -13,6 +16,144 @@ from tqdm import tqdm
 ######################
 ##### FUNCTIONS ######
 ######################
+
+
+def find_teams(data, teams_dict):
+    """
+    Identifies the two most commonly mentioned teams in a DataFrame column containing tweets.
+
+    Args:
+        data (pd.DataFrame): The DataFrame containing the tweets.
+        teams_dict (dict): A dictionary mapping team full names to their acronyms.
+
+    Returns:
+        tuple: A tuple containing the full names of the two most commonly mentioned teams.
+
+    Raises:
+        ValueError: If there are not enough teams mentioned in the dataset to identify two distinct teams.
+    """
+    team_counter = Counter()
+
+    for tweet in data['Tweet']:
+        for team_full, team_acronym in teams_dict.items():
+            # Combine counts of full names and acronyms
+            if re.search(rf"\b{team_full}\b", tweet, re.IGNORECASE) or re.search(rf"\b{team_acronym}\b", tweet, re.IGNORECASE):
+                team_counter[team_full] += 1  # Count everything under the full name
+
+    # Identify the two most common teams
+    most_common_teams = team_counter.most_common(2)
+    if len(most_common_teams) < 2:
+        raise ValueError("Not enough teams found in the dataset to identify team_1 and team_2.")
+
+    # Return the full names of the two teams
+    team_1 = most_common_teams[0][0]
+    team_2 = most_common_teams[1][0]
+
+    return team_1, team_2
+
+def replace_team_mentions(text, team_1, team_2, teams_dict):
+    """
+    Replaces mentions of specific teams in a text with generic tags for normalization.
+
+    Args:
+        text (str): The input text in which team mentions should be replaced.
+        team_1 (str): The full name of the first team to normalize mentions as "<team_1>".
+        team_2 (str): The full name of the second team to normalize mentions as "<team_2>".
+        teams_dict (dict): A dictionary mapping team full names to their acronyms.
+
+    Returns:
+        str: The text with mentions of team_1 replaced by "<team_1>", mentions of team_2 replaced by "<team_2>", 
+             and mentions of other teams replaced by "<team>".
+    """
+    # Replace mentions of team_1
+    for alias in [team_1, teams_dict[team_1]]:
+        text = re.sub(rf"\b{alias}\b", "<team_1>", text, flags=re.IGNORECASE)
+
+    # Replace mentions of team_2
+    for alias in [team_2, teams_dict[team_2]]:
+        text = re.sub(rf"\b{alias}\b", "<team_2>", text, flags=re.IGNORECASE)
+
+    # Replace mentions of all other teams
+    for team_full, team_acronym in teams_dict.items():
+        if team_full != team_1 and team_full != team_2:
+            text = re.sub(rf"\b{team_full}\b", "<team>", text, flags=re.IGNORECASE)
+            text = re.sub(rf"\b{team_acronym}\b", "<team>", text, flags=re.IGNORECASE)
+
+    return text
+
+def clean_tweets(df, column_name="Tweet", replace_teams=False, teams_dict = None, remove_one_word_tweets=False):
+    """
+    Cleans a DataFrame column containing tweets by performing various preprocessing steps.
+
+    Args:
+        df (pd.DataFrame): The DataFrame containing the tweets to clean.
+        column_name (str, optional): The name of the column to clean. Defaults to "Tweet".
+        replace_teams (bool, optional): Whether to replace team mentions with generic tags. Defaults to False.
+        teams_dict (dict, optional): A dictionary mapping team names to their acronyms. Defaults to a predefined dictionary.
+        remove_one_word_tweets (bool, optional): Whether to remove tweets with only one word. Defaults to False.
+
+    Returns:
+        pd.DataFrame: The DataFrame with the specified column cleaned.
+    """
+    # # Emoji regex pattern
+    # EMOJI_PATTERN = re.compile(
+    #     "[" 
+    #     "\U0001F600-\U0001F64F"  # Emoticons
+    #     "\U0001F300-\U0001F5FF"  # Symbols & Pictographs
+    #     "\U0001F680-\U0001F6FF"  # Transport & Map Symbols
+    #     "\U0001F1E0-\U0001F1FF"  # Flags
+    #     "\U00002700-\U000027BF"  # Dingbats
+    #     "\U0001F900-\U0001F9FF"  # Supplemental Symbols and Pictographs
+    #     "\U00002600-\U000026FF"  # Miscellaneous Symbols
+    #     "\U00002B50-\U00002B55"  # Miscellaneous Symbols and Arrows
+    #     "\U0001FA70-\U0001FAFF"  # Symbols and Pictographs Extended-A
+    #     "]+",
+    #     flags=re.UNICODE,
+    # )
+    
+    # We do this to make it adaptable to other datasets eventually
+    if teams_dict is None:
+        teams_dict = {
+        "South Africa": "RSA", "Argentina": "ARG", "Australia": "AUS", "Brazil": "BRA",
+        "Cameroon": "CMR", "Chile": "CHI", "Costa Rica": "CRC", "Denmark": "DEN",
+        "England": "ENG", "France": "FRA", "Germany": "GER", "Ghana": "GHA",
+        "Honduras": "HON", "Italy": "ITA", "Ivory Coast": "CIV", "Japan": "JPN",
+        "Mexico": "MEX", "Netherlands": "NED", "New Zealand": "NZL", "Nigeria": "NGA",
+        "North Korea": "PRK", "Paraguay": "PAR", "Portugal": "POR", "Slovakia": "SVK",
+        "Slovenia": "SLO", "South Korea": "KOR", "Spain": "ESP", "Switzerland": "SUI",
+        "United States": "USA", "Uruguay": "URU", "Algeria": "ALG", "Serbia": "SRB",
+        "Belgium": "BEL", "Bosnia and Herzegovina": "BIH", "Colombia": "COL",
+        "Croatia": "CRO", "Ecuador": "ECU", "Greece": "GRE", "Iran": "IRN",
+        "Russia": "RUS"
+        }
+
+    df = df.drop_duplicates(subset=[column_name], keep="first") # Drop duplicates
+    df = df[~df[column_name].str.startswith('RT')] # Remove retweets
+    df.loc[:, column_name] = (
+        df[column_name]
+        .str.lower() # lowercase
+        # .apply(lambda text: re.sub(r'@\w+', '', text)) # Remove mentions
+        .apply(lambda text: re.sub(r'#(\w+)', r'\1', text)) # Remove hashtag symbol
+        # .apply(lambda text: re.sub(r'http[s]?\S+', '', text)) # Remove URLs
+        # .apply(lambda text: re.sub(EMOJI_PATTERN, '', text)) # Remove emojis
+        .apply(lambda text: text.replace('\n', '')) # Remove \n
+        # .apply(lambda text: re.sub(r'[^\w\s!?]', '', text)) # Remove punctuation except !,?
+        .apply(lambda text: re.sub(r'\s+', ' ', text).strip()) # Remove extra spaces and trim
+    )
+    
+    # Replace team mentions with generic tags
+    if replace_teams:
+        team_1, team_2 = find_teams(df, teams_dict)
+        df.loc[:, column_name] = df[column_name].apply(lambda text: replace_team_mentions(text, team_1, team_2, teams_dict))
+
+    df = df[df[column_name] != ''] # Remove rows with empty tweets
+    df = df[df[column_name].apply(lambda text: bool(re.search(r'[a-zA-Z0-9]', text)))] # Remove rows with primarily non-ASCII characters
+    
+    # remove tweets with one word
+    if remove_one_word_tweets:
+        df = df[df[column_name].apply(lambda text: len(text.split()) > 1)] 
+
+    return df
 
 def get_length_info(series, tokenizer, percentiles=[50, 90, 95, 99], plot=True, verbose=True):
     """
@@ -95,8 +236,15 @@ def aggregate_embeddings(embeddings, criterion = "mean"):
         np.array: The aggregated embedding.
     """
     # other criterions to be added.
+    embeddings = np.array(embeddings)
     if criterion == "mean":
-        return np.mean(np.array(embeddings), axis=0)
+        return np.mean(embeddings, axis=0)
+    elif criterion == "similarity":
+        reference_embedding = np.mean(embeddings, axis = 0) # shape (768)
+        similarities = cosine_similarity(embeddings, reference_embedding.reshape(1, -1)).flatten() # shape (n_samples)
+        attention_weights = torch.softmax(torch.tensor(similarities), dim=0).numpy() # shape (n_samples)
+        return np.dot(attention_weights, embeddings) # shape (768)
+    
     
     
 def process_and_merge_embeddings(df, cls_column, id_column, event_column, aggregation_func, criterion="mean", output_format=None, output_path=None):
