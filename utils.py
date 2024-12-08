@@ -334,5 +334,118 @@ class BertweetBaseMLP(nn.Module):
         
     def forward(self, x):
         return self.network(x)
-    
-# add here new models if needed
+
+
+class BertweetBaseMLP(nn.Module):
+    """
+    A Multi-Layer Perceptron (MLP) model for binary classification tasks, designed to process 
+    embeddings and predict a single output value (e.g., probability of a class).
+
+    Args:
+        embedding_dim (int): The dimensionality of the input embeddings.
+
+    Attributes:
+        network (torch.nn.Sequential): A sequential neural network comprising:
+            - Fully connected layer (embedding_dim -> 512) with PReLU activation.
+            - Fully connected layer (512 -> 256) with BatchNorm1d, PReLU activation, and Dropout(0.5).
+            - Fully connected layer (256 -> 128) with BatchNorm1d, PReLU activation, and Dropout(0.5).
+            - Fully connected layer (128 -> 64) with BatchNorm1d, PReLU activation, and Dropout(0.5).
+            - Final fully connected layer (64 -> 1) for binary classification output.
+
+    Methods:
+        forward(x):
+            Performs a forward pass through the network.
+
+            Args:
+                x (torch.Tensor): Input tensor of shape (batch_size, embedding_dim).
+
+            Returns:
+                torch.Tensor: Output tensor of shape (batch_size, 1), representing the raw logits.
+    """
+
+    def __init__(self, embedding_dim):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(embedding_dim, 512),
+            nn.PReLU(),
+            
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.PReLU(),
+            nn.Dropout(0.5),
+            
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.PReLU(),
+            nn.Dropout(0.5),
+            
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.PReLU(),
+            nn.Dropout(0.5),
+            
+            nn.Linear(64, 1),
+        )
+        
+    def forward(self, x):
+        return self.network(x)
+
+class BertweetMLP128Layer(nn.Module):
+    """
+    A Multi-Layer Perceptron (MLP) model for dimensionality reduction and binary classification.
+
+    The model reduces the input dimension (768) to 128 and maintains intermediate layers of size 128,
+    before further reducing to 64 and finally outputting a single value.
+
+    Args:
+        embedding_dim (int): The dimensionality of the input embeddings.
+
+    Attributes:
+        network (torch.nn.Sequential): A sequential neural network comprising:
+            - Fully connected layers (768 -> 128, 128 -> 128, ..., 128 -> 64 -> 1)
+            - BatchNorm1d, PReLU activation, and Dropout applied at each layer.
+
+    Methods:
+        forward(x):
+            Performs a forward pass through the network.
+
+            Args:
+                x (torch.Tensor): Input tensor of shape (batch_size, embedding_dim).
+
+            Returns:
+                torch.Tensor: Output tensor of shape (batch_size, 1), representing the raw logits.
+    """
+
+    def __init__(self, embedding_dim):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(embedding_dim, 128),
+            nn.BatchNorm1d(128),
+            nn.PReLU(),
+            nn.Dropout(0.3),
+
+            nn.Linear(128, 128),
+            nn.BatchNorm1d(128),
+            nn.PReLU(),
+            nn.Dropout(0.5),
+
+            nn.Linear(128, 128),
+            nn.BatchNorm1d(128),
+            nn.PReLU(),
+            nn.Dropout(0.5),
+
+            nn.Linear(128, 128),
+            nn.BatchNorm1d(128),
+            nn.PReLU(),
+            nn.Dropout(0.5),
+
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.PReLU(),
+            nn.Dropout(0.3),
+
+            nn.Linear(64, 1),
+        )
+
+    def forward(self, x):
+        return self.network(x)
