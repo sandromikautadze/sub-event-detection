@@ -238,13 +238,7 @@ def aggregate_embeddings(embeddings, criterion = "mean"):
     # other criterions to be added.
     embeddings = np.array(embeddings)
     if criterion == "mean":
-        return np.mean(embeddings, axis=0)
-    elif criterion == "similarity":
-        reference_embedding = np.mean(embeddings, axis = 0) # shape (768)
-        similarities = cosine_similarity(embeddings, reference_embedding.reshape(1, -1)).flatten() # shape (n_samples)
-        attention_weights = torch.softmax(torch.tensor(similarities), dim=0).numpy() # shape (n_samples)
-        return np.dot(attention_weights, embeddings) # shape (768)
-    
+        return np.mean(embeddings, axis=0)    
     
     
 def process_and_merge_embeddings(df, cls_column, id_column, event_column, aggregation_func, criterion="mean", output_format=None, output_path=None):
