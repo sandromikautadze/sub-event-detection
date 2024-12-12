@@ -10,7 +10,17 @@ import re
 from collections import Counter
 import torch
 import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
+from sklearn.metrics.pairwise import cosine_similarity
+import torch.nn.functional as F
+import os
+import re
+import numpy as np
+import pandas as pd
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from collections import Counter
 
 
 ######################
@@ -301,6 +311,92 @@ def process_and_merge_embeddings(df, cls_column, id_column, event_column, aggreg
         
     return aggregated_embeddings, merged_df
 
+def process_and_merge_embeddings_by_similarity(df, cls_column="cls", event_type_column="EventType", id_column="ID", output_format=None, output_path=None):
+    """
+    Aggregates embeddings per ID and merges the result with unique event-related data.
+
+    Args:
+        df (pd.DataFrame): The input DataFrame containing embeddings and labels.
+        cls_column (str): The name of the column containing individual embeddings (e.g., 'cls').
+        event_type_column (str): The name of the column containing labels (e.g., 'EventType').
+        id_column (str): The name of the column used for grouping (e.g., 'ID').
+        output_format (str, optional): The format to save the output ('csv' or 'pkl'). Defaults to None.
+        output_path (str, optional): The path to save the output file. Required if `output_format` is specified.
+
+    Returns:
+        pd.DataFrame: A merged DataFrame containing aggregated embeddings and associated labels.
+        
+    Raises:
+        ValueError: If `output_path` is not provided when `output_format` is specified.
+        ValueError: If an invalid `output_format` is provided.
+    """
+    id_aggregated_embeddings = []
+
+    # Group by ID
+    id_groups = df.groupby(id_column)
+
+    for unique_id, id_samples in id_groups:
+        # Group the ID data by EventType
+        event_type_groups = id_samples.groupby(event_type_column)
+        event_type_aggregations = []
+        total_tweets_in_id = len(id_samples)
+
+        for event_type, event_type_samples in event_type_groups:
+            # Extract embeddings for the current event type
+            embeddings = np.vstack(event_type_samples[cls_column])  # (N, D)
+
+            # Compute the reference embedding (mean)
+            reference_embedding = np.mean(embeddings, axis=0)
+
+            # Compute cosine similarities with the reference embedding
+            similarities = cosine_similarity(embeddings, reference_embedding.reshape(1, -1)).flatten()
+
+            # Normalize similarities using softmax to get attention weights
+            attention_weights = torch.softmax(torch.tensor(similarities), dim=0).numpy()
+
+            # Compute weighted aggregation for this event type
+            weighted_aggregation = np.dot(attention_weights, embeddings)
+
+            # Store the weighted aggregation with its contribution weight (based on size)
+            event_type_aggregations.append((weighted_aggregation, len(embeddings)))
+
+        # Combine weighted aggregations from all event types
+        final_id_embedding = sum(
+            (event_size / total_tweets_in_id) * event_embedding
+            for event_embedding, event_size in event_type_aggregations
+        )
+        id_aggregated_embeddings.append({"ID": unique_id, "aggregated_embedding": final_id_embedding})
+
+    # Convert to DataFrame
+    aggregated_df = pd.DataFrame(id_aggregated_embeddings)
+
+    # Merge with labels or unique event-related data
+    merged_df = pd.merge(
+        aggregated_df,
+        df[[id_column, event_type_column]].drop_duplicates(),
+        on=id_column,
+        how="inner"
+    )
+    
+    # save output if requested
+    if output_format:
+        if not output_path:
+            raise ValueError("output_path must be specified if output_format is provided.")
+        
+        if output_format == 'csv':
+            print(f"Saving merged DataFrame as {output_format} in {output_path}")
+            merged_df.to_csv(output_path, index=False)
+            print("Saved!")
+        elif output_format == 'pkl':
+            print(f"Saving merged DataFrame as {output_format} in {output_path}")
+            merged_df.to_pickle(output_path)
+            print("Saved!")
+        else:
+            raise ValueError("Invalid output_format. Choose 'csv' or 'pkl'.")
+    
+    return merged_df
+
+
 def train_and_validate_model(model, train_loader, val_loader, criterion, optimizer, device, epochs=100, seed=42, use_tqdm=True):
     """
     Train and (optionally) validate a PyTorch model.
@@ -417,66 +513,257 @@ def train_and_validate_model(model, train_loader, val_loader, criterion, optimiz
 
     return history
 
-# add here new functions if needed
 
-######################
-####### MODELS #######
-######################
+## feature engineering
+    
+def find_teams(data, teams_dict):
+    team_counter = Counter()
 
-class BertweetBaseMLP(nn.Module):
+    for tweet in data['Tweet']:
+        for team_full, team_acronym in teams_dict.items():
+            # Combine counts of full names and acronyms
+            if re.search(rf"\b{team_full}\b", tweet, re.IGNORECASE) or re.search(rf"\b{team_acronym}\b", tweet, re.IGNORECASE):
+                team_counter[team_full] += 1  # Count everything under the full name
+
+    # Identify the two most common teams
+    most_common_teams = team_counter.most_common(2)
+    if len(most_common_teams) < 2:
+        raise ValueError("Not enough teams found in the dataset to identify team_1 and team_2.")
+
+    # Return the full names of the two teams
+    team_1 = most_common_teams[0][0]
+    team_2 = most_common_teams[1][0]
+
+
+    return team_1, team_2
+
+def replace_team_mentions(text, team_1, team_2, teams_dict):
+    # Replace mentions of team_1
+    for alias in [team_1, teams_dict[team_1]]:
+        text = re.sub(rf"\b{alias}\b", "team_1", text, flags=re.IGNORECASE)
+        #text = re.sub(rf"#({alias})\b", "#team_1", text, flags=re.IGNORECASE)
+
+    # Replace mentions of team_2
+    for alias in [team_2, teams_dict[team_2]]:
+        text = re.sub(rf"\b{alias}\b", "team_2", text, flags=re.IGNORECASE)
+        #text = re.sub(rf"#({alias})\b", "#team_2", text, flags=re.IGNORECASE)
+
+    # Replace mentions of all other teams
+    for team_full, team_acronym in teams_dict.items():
+        if team_full != team_1 and team_full != team_2:
+            text = re.sub(rf"\b{team_full}\b", "team", text, flags=re.IGNORECASE)
+            text = re.sub(rf"\b{team_acronym}\b", "team", text, flags=re.IGNORECASE)
+            #text = re.sub(rf"#({team_full}|{team_acronym})\b", "#team", text, flags=re.IGNORECASE)
+
+    return text
+
+def preprocess_text(text):
+    # Lowercase
+    text = text.lower()
+
+    # Replace URLs and mentions
+    text = re.sub(r"http\S+|www\S+", "", text)  # Replace URLs with <URL>
+    text = re.sub(r"@\w+", "", text)  # Replace mentions with <MENTION>
+
+    # Remove emojis and special characters
+    text = re.sub(r"[^\w\s]", "", text)
+
+    # Remove numbers
+    text = re.sub(r'\d+', '', text)
+    # Tokenization
+    words = text.split()
+    # Remove stopwords
+    stop_words = set(stopwords.words('english'))
+    words = [word for word in words if word not in stop_words]
+   # Lemmatization
+    lemmatizer = WordNetLemmatizer()
+    words = [lemmatizer.lemmatize(word) for word in words]
+    return ' '.join(words)
+
+teams_dict = {
+    "South Africa": "RSA", "Argentina": "ARG", "Australia": "AUS", "Brazil": "BRA",
+    "Cameroon": "CMR", "Chile": "CHI", "Costa Rica": "CRC", "Denmark": "DEN",
+    "England": "ENG", "France": "FRA", "Germany": "GER", "Ghana": "GHA",
+    "Honduras": "HON", "Italy": "ITA", "Ivory Coast": "CIV", "Japan": "JPN",
+    "Mexico": "MEX", "Netherlands": "NED", "New Zealand": "NZL", "Nigeria": "NGA",
+    "North Korea": "PRK", "Paraguay": "PAR", "Portugal": "POR", "Slovakia": "SVK",
+    "Slovenia": "SLO", "South Korea": "KOR", "Spain": "ESP", "Switzerland": "SUI",
+    "United States": "USA", "Uruguay": "URU", "Algeria": "ALG", "Serbia": "SRB",
+    "Belgium": "BEL", "Bosnia and Herzegovina": "BIH", "Colombia": "COL",
+    "Croatia": "CRO", "Ecuador": "ECU", "Greece": "GRE", "Iran": "IRN",
+    "Russia": "RUS"
+}
+
+team_performance_scores = {
+    "Argentina": 95,
+    "Australia": 45,
+    "Brazil": 95,
+    "Cameroon": 40,
+    "Chile": 65,
+    "Costa Rica": 42,
+    "Denmark": 65,
+    "England": 90,
+    "France": 90,
+    "Germany": 100,
+    "Ghana": 60,
+    "Honduras": 35,
+    "Italy": 85,
+    "Ivory Coast": 62,
+    "Japan": 60,
+    "Mexico": 65,
+    "Netherlands": 85,
+    "New Zealand": 30,
+    "Nigeria": 60,
+    "North Korea": 20,
+    "Paraguay": 40,
+    "Portugal": 80,
+    "Slovakia": 58,
+    "Slovenia": 42,
+    "South Africa": 55,
+    "South Korea": 60,
+    "Spain": 100,
+    "Switzerland": 75,
+    "United States": 63,
+    "Uruguay": 80,
+    "Algeria": 55,
+    "Serbia": 58,
+    "Belgium": 90,
+    "Bosnia and Herzegovina": 45,
+    "Colombia": 78,
+    "Croatia": 77,
+    "Ecuador": 43,
+    "Greece": 60,
+    "Iran": 35,
+    "Russia": 65
+}
+
+
+def extract_features(text):
+
+    # Extract Hashtag count 
+    hashtags = re.findall(r"#(\w+)", text)  
+    hashtag_count = len(hashtags)
+
+    # Count Exclamation Marks
+    exclamation_count = text.count("!")
+
+    return hashtag_count, exclamation_count
+
+def load_and_process_tweets(
+    directory, teams_dict=teams_dict, team_performance_scores=team_performance_scores, window_size=5
+):
     """
-    A Multi-Layer Perceptron (MLP) model for binary classification tasks, designed to process 
-    embeddings and predict a single output value (e.g., probability of a class).
+    Load and process tweets from CSV files, extracting features, handling rolling statistics,
+    and adding team performance scores.
 
     Args:
-        embedding_dim (int): The dimensionality of the input embeddings.
+        directory (str): Path to the directory containing CSV files.
+        teams_dict (dict): Mapping of team names to abbreviations.
+        team_performance_scores (dict): Mapping of team names to performance scores.
+        window_size (int): Window size of temporal features.
 
-    Attributes:
-        network (torch.nn.Sequential): A sequential neural network comprising:
-            - Fully connected layer (embedding_dim -> 512) with PReLU activation.
-            - Fully connected layer (512 -> 256) with BatchNorm1d, PReLU activation, and Dropout(0.5).
-            - Fully connected layer (256 -> 128) with BatchNorm1d, PReLU activation, and Dropout(0.5).
-            - Fully connected layer (128 -> 64) with BatchNorm1d, PReLU activation, and Dropout(0.5).
-            - Final fully connected layer (64 -> 1) for binary classification output.
-
-    Methods:
-        forward(x):
-            Performs a forward pass through the network.
-
-            Args:
-                x (torch.Tensor): Input tensor of shape (batch_size, embedding_dim).
-
-            Returns:
-                torch.Tensor: Output tensor of shape (batch_size, 1), representing the raw logits.
+    Returns:
+        pd.DataFrame: Processed DataFrame with extracted features.
     """
 
-    def __init__(self, embedding_dim):
-        super().__init__()
-        self.network = nn.Sequential(
-            nn.Linear(embedding_dim, 512),
-            nn.PReLU(),
-            
-            nn.Linear(512, 256),
-            nn.BatchNorm1d(256),
-            nn.PReLU(),
-            nn.Dropout(0.5),
-            
-            nn.Linear(256, 128),
-            nn.BatchNorm1d(128),
-            nn.PReLU(),
-            nn.Dropout(0.5),
-            
-            nn.Linear(128, 64),
-            nn.BatchNorm1d(64),
-            nn.PReLU(),
-            nn.Dropout(0.5),
-            
-            nn.Linear(64, 1),
-        )
-        
-    def forward(self, x):
-        return self.network(x)
+    # List to store processed data
+    processed_data = []
 
+    # Iterate over CSV files in the directory
+    for filename in os.listdir(directory):
+        if filename.endswith(".csv"):
+            # Load CSV file
+            df = pd.read_csv(os.path.join(directory, filename))
+
+            # Remove retweets and duplicates
+            df = df[~df['Tweet'].str.startswith('RT')]
+            df = df.drop_duplicates(subset=['Tweet'], keep="first").reset_index(drop=True)
+
+            # Extract basic features
+            df[['Hashtags Count', 'Exclamation_Count']] = df['Tweet'].apply(
+                lambda x: pd.Series(extract_features(x))
+            )
+
+            # Preprocess tweets
+            df['Tweet'] = df['Tweet'].apply(preprocess_text)
+            df['TweetLength'] = df['Tweet'].apply(len)
+            df['Tokens'] = df['Tweet'].apply(lambda x: x.split())
+
+            # Calculate tweet count per period
+            df['TweetCount_PerPeriod'] = df.groupby('PeriodID')['Tweet'].transform('count')
+
+            # Find teams and calculate team performance scores
+            team_1, team_2 = find_teams(df, teams_dict)
+            print(f"Team 1: {team_1}, Team 2: {team_2}")
+            print(f"Team 1 Score: {team_performance_scores[team_1]}, Team 2 Score: {team_performance_scores[team_2]}")
+
+            # Replace team mentions in tweets
+            df['Tweet'] = df['Tweet'].apply(lambda x: replace_team_mentions(x, team_1, team_2, teams_dict))
+
+            # Calculate team score difference
+            df['Team_Score'] = abs(team_performance_scores[team_1] - team_performance_scores[team_2])
+
+            # Function to calculate previous period tweet frequencies
+            def calculate_previous_period_features(group):
+                group = group.sort_values('PeriodID')
+                rolling_features = group[['PeriodID', 'TweetCount_PerPeriod']].drop_duplicates()
+                rolling_features = rolling_features.sort_values('PeriodID')
+
+                for i in range(1, 6):  # Calculate features for up to 5 previous periods
+                    rolling_features[f'Previous{i}_TweetFreq'] = rolling_features['TweetCount_PerPeriod'].shift(i)
+
+                group = group.merge(
+                    rolling_features[['PeriodID'] + [f'Previous{i}_TweetFreq' for i in range(1, 6)]],
+                    how='left',
+                    on='PeriodID'
+                )
+
+                return group
+
+            # Apply feature calculation for each match
+            df = df.groupby('MatchID').apply(calculate_previous_period_features).reset_index(drop=True)
+
+            # Replace NaN values with 0
+            df.fillna(0, inplace=True)
+
+            # Append processed DataFrame to the list
+            processed_data.append(df)
+
+    # Concatenate all processed DataFrames
+    final_df = pd.concat(processed_data, ignore_index=True)
+
+    return final_df
+
+def calculate_top_tfidf_from_existing(df, tokens_column, tfidf_df, top_n=30):
+    # Step 1: Identify the top-n TF-IDF words
+    tfidf_scores = tfidf_df.sum(axis=0)  # Sum scores for each word
+    top_tfidf_indices = tfidf_scores.argsort()[-top_n:][::-1]  # Indices of top-n words
+    top_tfidf_words = tfidf_df.columns[top_tfidf_indices]  # Get the corresponding words
+    
+    
+    # Step 2: Count the occurrences of top TF-IDF words in each row's tokens
+    def count_top_tfidf_tokens(tokens):
+        return sum(1 for token in tokens if token.lower() in top_tfidf_words)
+    
+    # Create a new column with the count
+    df['TopTFIDFWordCount'] = df[tokens_column].apply(
+        lambda tokens: count_top_tfidf_tokens(tokens) if isinstance(tokens, list) else 0
+    )
+    return df
+
+
+# models
+
+def load_embeddings(file_path):
+    print(f"Loading embeddings from {file_path}...")
+    df = pd.read_pickle(file_path)
+    df["MatchID"] = df["ID"].apply(lambda x: x.split("_")[0])  # Extract MatchID from ID
+    print(f"Loaded {len(df)} PeriodIDs.")
+    return df
+
+######################
+####### CLASSES #######
+######################            
 
 class BertweetBaseMLP(nn.Module):
     """
@@ -591,3 +878,67 @@ class BertweetMLP128Layer(nn.Module):
 
     def forward(self, x):
         return self.network(x)
+
+class EmbeddingDataset(Dataset):
+    def __init__(self, df):
+        self.embeddings = np.stack(df["aggregated_embedding"].values).astype(np.float32) # 2136,768
+        self.labels = df["EventType"].values.astype(np.int64)
+
+    def __len__(self):
+        return len(self.embeddings)
+
+    def __getitem__(self, idx):
+        return self.embeddings[idx], self.labels[idx]
+
+class ProjectionHead(nn.Module):
+    def __init__(self, input_dim=768, hidden_dim=512, output_dim=256, dropout_p=0.2):
+        super(ProjectionHead, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(p=dropout_p),  
+            nn.Linear(hidden_dim, output_dim)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+    
+class SupervisedContrastiveLoss(nn.Module):
+    def __init__(self, high_temperature=0.8, low_temperature=0.2, total_epochs=10, fraction_epochs=0.3):
+        super(SupervisedContrastiveLoss, self).__init__()
+        self.high_temperature = high_temperature
+        self.low_temperature = low_temperature
+        self.total_epochs = total_epochs
+        self.fraction_epochs = fraction_epochs
+        self.current_epoch = 0
+
+    def set_epoch(self, epoch):
+        self.current_epoch = epoch
+
+    def get_temperature(self):
+        # fraction of completed epochs
+        fraction = self.current_epoch / float(self.total_epochs)
+
+        if fraction < self.fraction_epochs:
+            return self.high_temperature
+        else:
+            fraction_after_knee = (fraction - self.fraction_epochs) / (1.0 - self.fraction_epochs)
+            decayed_temp = self.high_temperature - (self.high_temperature - self.low_temperature) * fraction_after_knee
+            return max(decayed_temp, self.low_temperature)
+
+    def forward(self, embeddings, labels):
+    
+        embeddings = F.normalize(embeddings, p=2, dim=1)
+        
+        temperature = self.get_temperature()
+        similarity_matrix = torch.matmul(embeddings, embeddings.T) / temperature
+        
+        # Mask to identify positive pairs
+        labels = labels.unsqueeze(1)  # (batch_size, 1)
+        mask = torch.eq(labels, labels.T).float()  # (batch_size, batch_size)
+        
+        exp_similarity = torch.exp(similarity_matrix)
+        positive_pairs = mask * exp_similarity
+        loss = -torch.log((positive_pairs.sum(dim=1) + 1e-8) / exp_similarity.sum(dim=1))
+        return loss.mean()
+    
